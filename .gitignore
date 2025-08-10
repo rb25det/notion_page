@@ -73,5 +73,5 @@ coverage.xml
 Thumbs.db
 
 # add tenp
-.tenp/
+tenp/
 
