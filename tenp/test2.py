@@ -9,8 +9,7 @@ load_dotenv()
 notion = Client(auth=os.getenv("NOTION_TOKEN"))
 
 # --- 固定設定 ---
-TEMPLATE_PAGE_ID = "235337f925e580578bc8c08d97a868b0"  # 例: あなたのテンプレページ
-PARENT_PAGE_ID = "abb83335da22455d9886d44f31ae0733"
+
 REPLACE_TEXT = "XXXX"  # テンプレで置き換え対象になっている日付文字
 
 # --- 日付範囲（今週の月曜～日曜） ---
