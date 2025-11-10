@@ -72,7 +72,7 @@ def sanitize_block_for_create(block: Dict[str, Any]) -> Dict[str, Any]:
     # 代表的な読み取り専用フィールドを除去
     for k in [
         "id", "created_time", "last_edited_time", "archived", "has_children",
-        "object"
+        "object", "parent", "created_by", "last_edited_by", "in_trash"
     ]:
         b.pop(k, None)
 
@@ -96,6 +96,73 @@ def sanitize_blocks(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if "type" in cleaned_blk and cleaned_blk.get(cleaned_blk["type"]):
             cleaned.append(cleaned_blk)
     return cleaned
+
+def clone_block_with_children(notion: Client, block: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    指定ブロックをサニタイズしつつ、has_children=True の場合は再帰的に子を取得して構築。
+    """
+    sanitized = sanitize_block_for_create(block)
+    block_type = sanitized.get("type")
+    block_payload = sanitized.get(block_type) if block_type else None
+    if not block_type or not isinstance(block_payload, dict):
+        return sanitized
+
+    if block.get("has_children"):
+        child_blocks = paginate_children(notion, block["id"])
+        block_payload["children"] = clone_blocks_with_children(notion, child_blocks)
+
+    return sanitized
+
+def clone_blocks_with_children(notion: Client, blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    cloned = []
+    for blk in blocks:
+        cloned_blk = clone_block_with_children(notion, blk)
+        block_type = cloned_blk.get("type")
+        if block_type and cloned_blk.get(block_type):
+            cloned.append(cloned_blk)
+    return cloned
+
+def append_block_tree(
+    notion: Client,
+    parent_id: str,
+    blocks: List[Dict[str, Any]],
+) -> None:
+    """
+    ブロックツリーを Notion 上に再帰的に構築する。
+    children を含むブロックは、一旦 children を除いた形で append し、
+    付与された ID を用いて子ブロックを追加する。
+    """
+    if not blocks:
+        return
+
+    batch: List[Dict[str, Any]] = []
+    child_lists: List[List[Dict[str, Any]]] = []
+
+    for blk in blocks:
+        blk_copy = copy.deepcopy(blk)
+        block_type = blk_copy.get("type")
+        payload = blk_copy.get(block_type)
+        children = []
+        if isinstance(payload, dict) and "children" in payload:
+            children = payload.pop("children") or []
+        batch.append(blk_copy)
+        child_lists.append(children)
+
+        if len(batch) == PAGE_SIZE:
+            resp = notion.blocks.children.append(block_id=parent_id, children=batch)
+            created_blocks = resp.get("results", [])
+            for created, child_nodes in zip(created_blocks, child_lists):
+                if child_nodes:
+                    append_block_tree(notion, created["id"], child_nodes)
+            batch = []
+            child_lists = []
+
+    if batch:
+        resp = notion.blocks.children.append(block_id=parent_id, children=batch)
+        created_blocks = resp.get("results", [])
+        for created, child_nodes in zip(created_blocks, child_lists):
+            if child_nodes:
+                append_block_tree(notion, created["id"], child_nodes)
 
 # =============================================================================
 # ページ/ブロック取得・生成ロジック
@@ -142,7 +209,7 @@ def build_monthly_task_toggle_from_last_week(
             # このトグルの子を取得し、サニタイズして貼り付け準備
             toggle_id = blk["id"]
             children = paginate_children(notion, toggle_id)
-            copied_children = sanitize_blocks(children)
+            copied_children = clone_blocks_with_children(notion, children)
 
             return {
                 "type": "toggle",
@@ -218,21 +285,16 @@ def create_week_page(
     先頭に Monthly TASK トグルを配置。
     戻り値: 作成ページID
     """
-    first_batch = [monthly_task_toggle] + content_blocks[: (PAGE_SIZE - 1)]
     resp = notion.pages.create(
         parent={"page_id": parent_page_id},
         properties={"title": [{"type": "text", "text": {"content": title}}]},
-        children=first_batch,
+        children=[],
     )
     page_id = resp["id"]
     print(f"✅ 今週ページ作成 → {resp['url']}")
 
-    # 以降の追記
-    remaining = content_blocks[(PAGE_SIZE - 1):]
-    for i in range(0, len(remaining), PAGE_SIZE):
-        chunk = remaining[i : i + PAGE_SIZE]
-        notion.blocks.children.append(block_id=page_id, children=chunk)
-        print(f"🔧 追記: ブロック {i+1}〜{i+len(chunk)}")
+    all_blocks = [monthly_task_toggle] + content_blocks
+    append_block_tree(notion, page_id, all_blocks)
 
     return page_id
 
